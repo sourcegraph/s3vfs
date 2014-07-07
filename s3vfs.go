@@ -36,24 +36,24 @@ func S3(bucket *url.URL, config *s3util.Config) rwvfs.FileSystem {
 	if config == nil {
 		config = &DefaultS3Config
 	}
-	return &s3FS{bucket, config}
+	return &S3FS{bucket, config}
 }
 
-type s3FS struct {
+type S3FS struct {
 	bucket *url.URL
 	config *s3util.Config
 }
 
-func (fs *s3FS) String() string {
+func (fs *S3FS) String() string {
 	return fmt.Sprintf("S3 filesystem at %s", fs.bucket)
 }
 
-func (fs *s3FS) url(path string) string {
+func (fs *S3FS) url(path string) string {
 	path = pathpkg.Join(fs.bucket.Path, path)
 	return fs.bucket.ResolveReference(&url.URL{Path: path}).String()
 }
 
-func (fs *s3FS) Open(name string) (vfs.ReadSeekCloser, error) {
+func (fs *S3FS) Open(name string) (vfs.ReadSeekCloser, error) {
 	rdr, err := s3util.Open(fs.url(name), fs.config)
 	if err != nil {
 		return nil, err
@@ -67,7 +67,7 @@ func (fs *s3FS) Open(name string) (vfs.ReadSeekCloser, error) {
 	return nopCloser{bytes.NewReader(b)}, nil
 }
 
-func (fs *s3FS) ReadDir(path string) ([]os.FileInfo, error) {
+func (fs *S3FS) ReadDir(path string) ([]os.FileInfo, error) {
 	dir, err := s3util.NewFile(fs.url(path), fs.config)
 	if err != nil {
 		return nil, err
@@ -89,7 +89,7 @@ func (fs *s3FS) ReadDir(path string) ([]os.FileInfo, error) {
 	return fis, nil
 }
 
-func (fs *s3FS) Lstat(name string) (os.FileInfo, error) {
+func (fs *S3FS) Lstat(name string) (os.FileInfo, error) {
 	name = filepath.Clean(name)
 
 	if name == "." {
@@ -113,22 +113,22 @@ func (fs *s3FS) Lstat(name string) (os.FileInfo, error) {
 	return nil, os.ErrNotExist
 }
 
-func (fs *s3FS) Stat(name string) (os.FileInfo, error) {
+func (fs *S3FS) Stat(name string) (os.FileInfo, error) {
 	return fs.Lstat(name)
 }
 
 // Create opens the file at path for writing, creating the file if it doesn't
 // exist and truncating it otherwise.
-func (fs *s3FS) Create(path string) (io.WriteCloser, error) {
+func (fs *S3FS) Create(path string) (io.WriteCloser, error) {
 	return s3util.Create(fs.url(path), nil, fs.config)
 }
 
-func (fs *s3FS) Mkdir(name string) error {
+func (fs *S3FS) Mkdir(name string) error {
 	// S3 doesn't have directories.
 	return nil
 }
 
-func (fs *s3FS) Remove(name string) error {
+func (fs *S3FS) Remove(name string) error {
 	rdr, err := s3util.Delete(fs.url(name), fs.config)
 	if rdr != nil {
 		rdr.Close()
