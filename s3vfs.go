@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"code.google.com/p/go.tools/godoc/vfs"
+	"golang.org/x/tools/godoc/vfs"
 
 	"github.com/sourcegraph/rwvfs"
 	"github.com/sqs/s3"
