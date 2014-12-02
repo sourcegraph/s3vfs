@@ -17,7 +17,7 @@ import (
 
 func TestS3VFS(t *testing.T) {
 	// Requires the test bucket to exist.
-	//   export S3_TEST_BUCKET_URL=https://s3-us-west-2.amazonaws.com/rwvfs-test-sqs
+	//   export S3_TEST_BUCKET_URL=https://rwvfs-test-sqs.s3-us-west-2.amazonaws.com
 	s3URL, _ := url.Parse(os.Getenv("S3_TEST_BUCKET_URL"))
 
 	tests := []struct {
