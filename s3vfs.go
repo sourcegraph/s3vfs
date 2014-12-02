@@ -13,9 +13,9 @@ import (
 
 	"golang.org/x/tools/godoc/vfs"
 
-	"github.com/sourcegraph/rwvfs"
 	"github.com/sqs/s3"
 	"github.com/sqs/s3/s3util"
+	"sourcegraph.com/sourcegraph/rwvfs"
 )
 
 var DefaultS3Config = s3util.Config{

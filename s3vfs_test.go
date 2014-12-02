@@ -12,7 +12,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/sourcegraph/rwvfs"
+	"sourcegraph.com/sourcegraph/rwvfs"
 )
 
 func TestS3VFS(t *testing.T) {
