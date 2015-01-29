@@ -67,6 +67,7 @@ func (fs *S3FS) Open(name string) (vfs.ReadSeekCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer rdr.Close()
 
 	return nopCloser{bytes.NewReader(b)}, nil
 }
@@ -113,6 +114,11 @@ func (fs *S3FS) lstat(name string) (os.FileInfo, error) {
 		}, nil
 	}
 
+	client := fs.config.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+
 	q := make(url.Values)
 	q.Set("prefix", name+"/")
 	q.Set("max-keys", "1")
@@ -124,16 +130,21 @@ func (fs *S3FS) lstat(name string) (os.FileInfo, error) {
 	}
 	req.Header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
 	fs.config.Sign(req, *fs.config.Keys)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != 200 {
+		resp.Body.Close()
 		return nil, newRespError(resp)
 	}
 
 	result := struct{ Contents []struct{ Key string } }{}
 	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	if err := resp.Body.Close(); err != nil {
 		return nil, err
 	}
 
@@ -153,10 +164,11 @@ func (fs *S3FS) lstat(name string) (os.FileInfo, error) {
 	}
 	req.Header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
 	fs.config.Sign(req, *fs.config.Keys)
-	resp, err = http.DefaultClient.Do(req)
+	resp, err = client.Do(req)
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, os.ErrNotExist
 	} else if resp.StatusCode != 200 {
