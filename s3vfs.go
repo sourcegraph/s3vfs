@@ -56,7 +56,7 @@ func (fs *S3FS) url(path string) string {
 func (fs *S3FS) Open(name string) (vfs.ReadSeekCloser, error) {
 	rdr, err := s3util.Open(fs.url(name), fs.config)
 	if err != nil {
-		return nil, err
+		return nil, &os.PathError{Op: "open", Path: fs.url(name), Err: err}
 	}
 
 	b, err := ioutil.ReadAll(rdr)
@@ -70,7 +70,7 @@ func (fs *S3FS) Open(name string) (vfs.ReadSeekCloser, error) {
 func (fs *S3FS) ReadDir(path string) ([]os.FileInfo, error) {
 	dir, err := s3util.NewFile(fs.url(path), fs.config)
 	if err != nil {
-		return nil, err
+		return nil, &os.PathError{Op: "readdir", Path: fs.url(path), Err: err}
 	}
 
 	fis, err := dir.Readdir(0)
@@ -110,7 +110,7 @@ func (fs *S3FS) Lstat(name string) (os.FileInfo, error) {
 			return fi, nil
 		}
 	}
-	return nil, os.ErrNotExist
+	return nil, &os.PathError{Op: "lstat", Path: fs.url(name), Err: os.ErrNotExist}
 }
 
 func (fs *S3FS) Stat(name string) (os.FileInfo, error) {
@@ -120,7 +120,11 @@ func (fs *S3FS) Stat(name string) (os.FileInfo, error) {
 // Create opens the file at path for writing, creating the file if it doesn't
 // exist and truncating it otherwise.
 func (fs *S3FS) Create(path string) (io.WriteCloser, error) {
-	return s3util.Create(fs.url(path), nil, fs.config)
+	wc, err := s3util.Create(fs.url(path), nil, fs.config)
+	if err != nil {
+		return nil, &os.PathError{Op: "create", Path: fs.url(path), Err: err}
+	}
+	return wc, nil
 }
 
 func (fs *S3FS) Mkdir(name string) error {
@@ -128,11 +132,17 @@ func (fs *S3FS) Mkdir(name string) error {
 	return nil
 }
 
-func (fs *S3FS) Remove(name string) error {
-	rdr, err := s3util.Delete(fs.url(name), fs.config)
-	if rdr != nil {
-		rdr.Close()
-	}
+func (fs *S3FS) Remove(name string) (err error) {
+	var rdr io.ReadCloser
+	rdr, err = s3util.Delete(fs.url(name), fs.config)
+	defer func() {
+		if rdr != nil {
+			err2 := rdr.Close()
+			if err == nil {
+				err = err2
+			}
+		}
+	}()
 	return err
 }
 
