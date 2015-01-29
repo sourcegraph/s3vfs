@@ -132,6 +132,12 @@ func (fs *S3FS) Mkdir(name string) error {
 	return nil
 }
 
+// MkdirAll implements rwvfs.MkdirAllOverrider.
+func (fs *S3FS) MkdirAll(name string) error {
+	// S3 doesn't have directories.
+	return nil
+}
+
 func (fs *S3FS) Remove(name string) (err error) {
 	var rdr io.ReadCloser
 	rdr, err = s3util.Delete(fs.url(name), fs.config)
