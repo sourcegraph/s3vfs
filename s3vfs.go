@@ -102,7 +102,7 @@ func (fs *S3FS) Lstat(name string) (os.FileInfo, error) {
 }
 
 func (fs *S3FS) lstat(name string) (os.FileInfo, error) {
-	name = filepath.Clean(name)
+	name = strings.TrimPrefix(filepath.Clean(name), "/")
 
 	if name == "." {
 		return &fileInfo{
@@ -114,7 +114,7 @@ func (fs *S3FS) lstat(name string) (os.FileInfo, error) {
 	}
 
 	q := make(url.Values)
-	q.Set("prefix", strings.TrimPrefix(pathpkg.Join(fs.bucket.Path, name)+"/", "/"))
+	q.Set("prefix", name+"/")
 	q.Set("max-keys", "1")
 	u := fs.bucket.ResolveReference(&url.URL{RawQuery: q.Encode()})
 
