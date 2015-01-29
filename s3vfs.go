@@ -2,9 +2,11 @@ package s3vfs
 
 import (
 	"bytes"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
 	pathpkg "path"
@@ -12,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/tools/godoc/vfs"
+
+	"strings"
 
 	"github.com/sqs/s3"
 	"github.com/sqs/s3/s3util"
@@ -90,6 +94,14 @@ func (fs *S3FS) ReadDir(path string) ([]os.FileInfo, error) {
 }
 
 func (fs *S3FS) Lstat(name string) (os.FileInfo, error) {
+	fi, err := fs.lstat(name)
+	if err != nil {
+		return nil, &os.PathError{Op: "lstat", Path: fs.url(name), Err: err}
+	}
+	return fi, nil
+}
+
+func (fs *S3FS) lstat(name string) (os.FileInfo, error) {
 	name = filepath.Clean(name)
 
 	if name == "." {
@@ -101,16 +113,62 @@ func (fs *S3FS) Lstat(name string) (os.FileInfo, error) {
 		}, nil
 	}
 
-	fis, err := fs.ReadDir(pathpkg.Dir(name))
+	q := make(url.Values)
+	q.Set("prefix", strings.TrimPrefix(pathpkg.Join(fs.bucket.Path, name)+"/", "/"))
+	q.Set("max-keys", "1")
+	u := fs.bucket.ResolveReference(&url.URL{RawQuery: q.Encode()})
+
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
-	for _, fi := range fis {
-		if fi.Name() == pathpkg.Base(name) {
-			return fi, nil
-		}
+	req.Header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
+	fs.config.Sign(req, *fs.config.Keys)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
 	}
-	return nil, &os.PathError{Op: "lstat", Path: fs.url(name), Err: os.ErrNotExist}
+	if resp.StatusCode != 200 {
+		return nil, newRespError(resp)
+	}
+
+	result := struct{ Contents []struct{ Key string } }{}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	// If Contents is non-empty, then this is a dir.
+	if len(result.Contents) == 1 {
+		return &fileInfo{
+			name: name,
+			size: 0,
+			mode: os.ModeDir,
+		}, nil
+	}
+
+	// Otherwise, see if a key exists here.
+	req, err = http.NewRequest("HEAD", fs.url(name), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
+	fs.config.Sign(req, *fs.config.Keys)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, os.ErrNotExist
+	} else if resp.StatusCode != 200 {
+		return nil, newRespError(resp)
+	}
+	t, _ := time.Parse(http.TimeFormat, resp.Header.Get("last-modified"))
+	return &fileInfo{
+		name:    name,
+		size:    resp.ContentLength,
+		mode:    0, // file
+		modTime: t,
+	}, nil
 }
 
 func (fs *S3FS) Stat(name string) (os.FileInfo, error) {
@@ -172,3 +230,24 @@ func (f *fileInfo) Mode() os.FileMode  { return f.mode }
 func (f *fileInfo) ModTime() time.Time { return f.modTime }
 func (f *fileInfo) IsDir() bool        { return f.mode&os.ModeDir != 0 }
 func (f *fileInfo) Sys() interface{}   { return f.sys }
+
+type respError struct {
+	r *http.Response
+	b bytes.Buffer
+}
+
+func newRespError(r *http.Response) *respError {
+	e := new(respError)
+	e.r = r
+	io.Copy(&e.b, r.Body)
+	r.Body.Close()
+	return e
+}
+
+func (e *respError) Error() string {
+	return fmt.Sprintf(
+		"unwanted http status %d: %q",
+		e.r.StatusCode,
+		e.b.String(),
+	)
+}
