@@ -172,63 +172,79 @@ func testOpen(t *testing.T, fs rwvfs.FileSystem) {
 			{fullLen / 2, fullLen/2 + 1},
 			{fullLen / 2, fullLen/2 + 2},
 			{fullLen / 2, fullLen / 2},
+			{fullLen - 10, fullLen - 1},
 		}
-		_ = fullLen
-		for _, reuse := range []bool{false, true} {
-			for i, c := range cases {
-				if !reuse || i == 0 {
-					var err error
-					f, err = fs.(rwvfs.FetcherOpener).OpenFetcher(path)
-					if err != nil {
-						t.Fatal(err)
+		for _, autofetch := range []bool{false, true} {
+			for _, reuse := range []bool{false, true} {
+				for i, c := range cases {
+					if !reuse || i == 0 {
+						var err error
+						f, err = fs.(rwvfs.FetcherOpener).OpenFetcher(path)
+						if err != nil {
+							t.Fatal(err)
+						}
 					}
-				}
 
-				rrt.reset()
+					f.(*explicitFetchFile).autofetch = autofetch
 
-				start, end := c[0], c[1]
-				label := fmt.Sprintf("range %d-%d (reuse=%v)", start, end, reuse)
+					rrt.reset()
 
-				if err := f.(rwvfs.Fetcher).Fetch(start, end); err != nil {
-					t.Error(err)
-					continue
-				}
+					start, end := c[0], c[1]
+					label := fmt.Sprintf("range %d-%d (autofetch=%v, reuse=%v)", start, end, autofetch, reuse)
 
-				n, err := f.Seek(start, 0)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if n != start {
-					t.Errorf("got post-Seek offset %d, want %d", n, start)
-				}
-				b, err := ioutil.ReadAll(io.LimitReader(f, end-start))
-				if err != nil {
-					t.Fatalf("%s: ReadAll: %s", label, err)
-				}
-
-				trunc := func(b []byte) string {
-					if len(b) > 75 {
-						return string(b[:75]) + "..." + string(b[len(b)-5:]) + fmt.Sprintf(" (%d bytes total)", len(b))
+					fetchEnd := end
+					if autofetch {
+						// Short fetch.
+						fetchEnd = (start + end) / 2
+						if fetchEnd < start {
+							fetchEnd = end
+						}
 					}
-					return string(b)
-				}
-				if want := fullData[start:end]; !bytes.Equal(b, want) {
-					t.Errorf("%s: full read: got %q, want %q", label, trunc(b), trunc(want))
-					continue
-				}
-
-				if start != end && !reuse {
-					if len(rrt.readRanges) == 0 {
-						t.Errorf("%s: no read ranges, want range %d-%d", label, start, end)
-					}
-					if err := rrt.checkOnlyReadRange(start, end); err != nil {
+					if err := f.(rwvfs.Fetcher).Fetch(start, fetchEnd); err != nil {
 						t.Error(err)
+						continue
 					}
-				}
 
-				if !reuse || i == len(cases)-1 {
-					if err := f.Close(); err != nil {
-						t.Fatal(err)
+					n, err := f.Seek(start, 0)
+					if err != nil {
+						t.Errorf("%s: %s", label, err)
+						continue
+					}
+					if n != start {
+						t.Errorf("got post-Seek offset %d, want %d", n, start)
+					}
+					b, err := ioutil.ReadAll(io.LimitReader(f, end-start))
+					if err != nil {
+						t.Errorf("%s: ReadAll: %s", label, err)
+						continue
+					}
+
+					trunc := func(b []byte) string {
+						if len(b) > 75 {
+							return string(b[:75]) + "..." + string(b[len(b)-5:]) + fmt.Sprintf(" (%d bytes total)", len(b))
+						}
+						return string(b)
+					}
+					if want := fullData[start:end]; !bytes.Equal(b, want) {
+						t.Errorf("%s: full read: got %q, want %q", label, trunc(b), trunc(want))
+						continue
+					}
+
+					if start != end && !reuse {
+						if len(rrt.readRanges) == 0 {
+							t.Errorf("%s: no read ranges, want range %d-%d", label, start, end)
+						}
+					}
+					if !autofetch {
+						if err := rrt.checkOnlyReadRange(start, end); err != nil {
+							t.Errorf("%s: %s", label, err)
+						}
+					}
+
+					if !reuse || i == len(cases)-1 {
+						if err := f.Close(); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
 			}

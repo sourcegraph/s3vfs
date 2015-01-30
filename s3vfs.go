@@ -123,7 +123,7 @@ func (fs *S3FS) open(name string, rangeHeader string) (vfs.ReadSeekCloser, error
 }
 
 func (fs *S3FS) OpenFetcher(name string) (vfs.ReadSeekCloser, error) {
-	return &explicitFetchFile{name: name, fs: fs}, nil
+	return &explicitFetchFile{name: name, fs: fs, autofetch: true}, nil
 }
 
 type explicitFetchFile struct {
@@ -131,6 +131,7 @@ type explicitFetchFile struct {
 	fs                 *S3FS
 	startByte, endByte int64
 	rc                 vfs.ReadSeekCloser
+	autofetch          bool
 }
 
 func (f *explicitFetchFile) Read(p []byte) (n int, err error) {
@@ -139,7 +140,13 @@ func (f *explicitFetchFile) Read(p []byte) (n int, err error) {
 		return 0, err
 	}
 	if start, end := ofs, ofs+int64(len(p)); !f.isFetched(start, end) {
-		return 0, fmt.Errorf("s3vfs: range %d-%d not fetched (%d-%d fetched; offset %d)", start, end, f.startByte, f.endByte, ofs)
+		if !f.autofetch {
+			return 0, fmt.Errorf("s3vfs: range %d-%d not fetched (%d-%d fetched; offset %d)", start, end, f.startByte, f.endByte, ofs)
+		}
+		const x = 4 // overfetch factor (because network RTT >> network throughput)
+		if err := f.Fetch(start, end*x); err != nil {
+			return 0, err
+		}
 	}
 	return f.rc.Read(p)
 }
@@ -165,19 +172,22 @@ func (f *explicitFetchFile) Fetch(start, end int64) error {
 	if err == nil {
 		f.startByte = start
 		f.endByte = end
-	} else {
-		f.startByte = 0
-		f.endByte = 0
 	}
 	return err
 }
 
+var errRelOfs = errors.New("s3vfs: seek to offset relative to end of file is not supported")
+
 func (f *explicitFetchFile) Seek(offset int64, whence int) (int64, error) {
+	if f.rc == nil {
+		return 0, errors.New("s3vfs: must call Fetch before Seek")
+	}
+
 	switch whence {
 	case 0:
 		offset -= f.startByte
 	case 2:
-		return 0, errors.New("s3vfs: seek to offset relative to end of file is not supported")
+		return 0, errRelOfs
 	}
 	n, err := f.rc.Seek(offset, whence)
 	n += f.startByte
