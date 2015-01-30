@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -134,6 +135,8 @@ type explicitFetchFile struct {
 	autofetch          bool
 }
 
+var vlog = log.New(ioutil.Discard, "s3vfs: ", 0)
+
 func (f *explicitFetchFile) Read(p []byte) (n int, err error) {
 	ofs, err := f.Seek(0, 1) // get current offset
 	if err != nil {
@@ -144,7 +147,9 @@ func (f *explicitFetchFile) Read(p []byte) (n int, err error) {
 			return 0, fmt.Errorf("s3vfs: range %d-%d not fetched (%d-%d fetched; offset %d)", start, end, f.startByte, f.endByte, ofs)
 		}
 		const x = 4 // overfetch factor (because network RTT >> network throughput)
-		if err := f.Fetch(start, end*x); err != nil {
+		fetchEnd := end + (end-start)*x
+		vlog.Printf("Autofetching range %d-%d because read of unfetched %d-%d attempted (%d bytes)", start, fetchEnd, start, end, len(p))
+		if err := f.Fetch(start, fetchEnd); err != nil {
 			return 0, err
 		}
 	}
@@ -158,6 +163,7 @@ func (f *explicitFetchFile) isFetched(start, end int64) bool {
 func (f *explicitFetchFile) Fetch(start, end int64) error {
 	if f.isFetched(start, end) {
 		// Already prefetched.
+		vlog.Printf("Already fetched %d-%d (fetched range is %d-%d)", start, end, f.startByte, f.endByte)
 		return nil
 	}
 
