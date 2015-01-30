@@ -149,7 +149,6 @@ func testOpen(t *testing.T, fs rwvfs.FileSystem) {
 		// Partial reads.
 		rrt := &rangeRecordingTransport{}
 		fs.(*S3FS).config.Client = &http.Client{Transport: rrt}
-		fs.(rwvfs.ExplicitFetchOpener).ExplicitFetch(true)
 
 		var f vfs.ReadSeekCloser
 
@@ -179,7 +178,7 @@ func testOpen(t *testing.T, fs rwvfs.FileSystem) {
 			for i, c := range cases {
 				if !reuse || i == 0 {
 					var err error
-					f, err = fs.Open(path)
+					f, err = fs.(rwvfs.FetcherOpener).OpenFetcher(path)
 					if err != nil {
 						t.Fatal(err)
 					}

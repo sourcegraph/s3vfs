@@ -41,21 +41,13 @@ func S3(bucket *url.URL, config *s3util.Config) rwvfs.FileSystem {
 	if config == nil {
 		config = &DefaultS3Config
 	}
-	return &S3FS{bucket, config, false}
+	return &S3FS{bucket, config}
 }
 
 type S3FS struct {
-	bucket        *url.URL
-	config        *s3util.Config
-	explicitFetch bool
+	bucket *url.URL
+	config *s3util.Config
 }
-
-// ExplicitFetch sets whether opened files are immediately
-// ioutil.ReadAll'd (false) or not and their Fetch method must be
-// called (true). In explicit fetch mode mode, each call to Read
-// issues an HTTP request with a specific byte range in the Range
-// request header.
-func (fs *S3FS) ExplicitFetch(v bool) { fs.explicitFetch = v }
 
 func (fs *S3FS) String() string {
 	return fmt.Sprintf("S3 filesystem at %s", fs.bucket)
@@ -67,9 +59,6 @@ func (fs *S3FS) url(path string) string {
 }
 
 func (fs *S3FS) Open(name string) (vfs.ReadSeekCloser, error) {
-	if fs.explicitFetch {
-		return fs.openExplicitFetch(name)
-	}
 	return fs.open(name, "")
 }
 
@@ -133,7 +122,7 @@ func (fs *S3FS) open(name string, rangeHeader string) (vfs.ReadSeekCloser, error
 	return nopCloser{bytes.NewReader(b)}, nil
 }
 
-func (fs *S3FS) openExplicitFetch(name string) (vfs.ReadSeekCloser, error) {
+func (fs *S3FS) OpenFetcher(name string) (vfs.ReadSeekCloser, error) {
 	return &explicitFetchFile{name: name, fs: fs}, nil
 }
 
