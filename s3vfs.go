@@ -3,6 +3,7 @@ package s3vfs
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -40,13 +41,21 @@ func S3(bucket *url.URL, config *s3util.Config) rwvfs.FileSystem {
 	if config == nil {
 		config = &DefaultS3Config
 	}
-	return &S3FS{bucket, config}
+	return &S3FS{bucket, config, false}
 }
 
 type S3FS struct {
-	bucket *url.URL
-	config *s3util.Config
+	bucket        *url.URL
+	config        *s3util.Config
+	explicitFetch bool
 }
+
+// ExplicitFetch sets whether opened files are immediately
+// ioutil.ReadAll'd (false) or not and their Fetch method must be
+// called (true). In explicit fetch mode mode, each call to Read
+// issues an HTTP request with a specific byte range in the Range
+// request header.
+func (fs *S3FS) ExplicitFetch(v bool) { fs.explicitFetch = v }
 
 func (fs *S3FS) String() string {
 	return fmt.Sprintf("S3 filesystem at %s", fs.bucket)
@@ -58,7 +67,60 @@ func (fs *S3FS) url(path string) string {
 }
 
 func (fs *S3FS) Open(name string) (vfs.ReadSeekCloser, error) {
-	rdr, err := s3util.Open(fs.url(name), fs.config)
+	if fs.explicitFetch {
+		return fs.openExplicitFetch(name)
+	}
+	return fs.open(name, "")
+}
+
+type rangeTransport struct {
+	http.RoundTripper
+	rangeVal string
+}
+
+func (t rangeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = cloneRequest(req)
+	req.Header.Set("range", t.rangeVal)
+
+	transport := t.RoundTripper
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+
+	resp, err := transport.RoundTrip(req)
+	if resp != nil && resp.StatusCode == http.StatusPartialContent {
+		resp.StatusCode = http.StatusOK
+	}
+	return resp, err
+}
+
+// cloneRequest returns a clone of the provided *http.Request. The clone is a
+// shallow copy of the struct and its Header map.
+func cloneRequest(r *http.Request) *http.Request {
+	// shallow copy of the struct
+	r2 := new(http.Request)
+	*r2 = *r
+	// deep copy of the Header
+	r2.Header = make(http.Header)
+	for k, s := range r.Header {
+		r2.Header[k] = s
+	}
+	return r2
+}
+
+func (fs *S3FS) open(name string, rangeHeader string) (vfs.ReadSeekCloser, error) {
+	cfg := fs.config
+	if rangeHeader != "" {
+		tmp := *cfg
+		cfg = &tmp
+		var existingTransport http.RoundTripper
+		if cfg.Client != nil {
+			existingTransport = cfg.Client.Transport
+		}
+		cfg.Client = &http.Client{Transport: rangeTransport{RoundTripper: existingTransport, rangeVal: rangeHeader}}
+	}
+
+	rdr, err := s3util.Open(fs.url(name), cfg)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: fs.url(name), Err: err}
 	}
@@ -68,8 +130,80 @@ func (fs *S3FS) Open(name string) (vfs.ReadSeekCloser, error) {
 		return nil, err
 	}
 	defer rdr.Close()
-
 	return nopCloser{bytes.NewReader(b)}, nil
+}
+
+func (fs *S3FS) openExplicitFetch(name string) (vfs.ReadSeekCloser, error) {
+	return &explicitFetchFile{name: name, fs: fs}, nil
+}
+
+type explicitFetchFile struct {
+	name               string
+	fs                 *S3FS
+	startByte, endByte int64
+	rc                 vfs.ReadSeekCloser
+}
+
+func (f *explicitFetchFile) Read(p []byte) (n int, err error) {
+	ofs, err := f.Seek(0, 1) // get current offset
+	if err != nil {
+		return 0, err
+	}
+	if start, end := ofs, ofs+int64(len(p)); !f.isFetched(start, end) {
+		return 0, fmt.Errorf("s3vfs: range %d-%d not fetched (%d-%d fetched; offset %d)", start, end, f.startByte, f.endByte, ofs)
+	}
+	return f.rc.Read(p)
+}
+
+func (f *explicitFetchFile) isFetched(start, end int64) bool {
+	return f.rc != nil && start <= end && start >= f.startByte && end <= f.endByte
+}
+
+func (f *explicitFetchFile) Fetch(start, end int64) error {
+	if f.isFetched(start, end) {
+		// Already prefetched.
+		return nil
+	}
+
+	// Close existing open reader (if any).
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	rng := fmt.Sprintf("bytes=%d-%d", start, end)
+	var err error
+	f.rc, err = f.fs.open(f.name, rng)
+	if err == nil {
+		f.startByte = start
+		f.endByte = end
+	} else {
+		f.startByte = 0
+		f.endByte = 0
+	}
+	return err
+}
+
+func (f *explicitFetchFile) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case 0:
+		offset -= f.startByte
+	case 2:
+		return 0, errors.New("s3vfs: seek to offset relative to end of file is not supported")
+	}
+	n, err := f.rc.Seek(offset, whence)
+	n += f.startByte
+	return n, err
+}
+
+func (f *explicitFetchFile) Close() error {
+	if f.rc != nil {
+		err := f.rc.Close()
+		f.rc = nil
+		f.startByte = 0
+		f.endByte = 0
+		return err
+	}
+	return nil
 }
 
 func (fs *S3FS) ReadDir(path string) ([]os.FileInfo, error) {

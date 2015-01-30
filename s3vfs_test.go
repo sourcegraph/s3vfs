@@ -2,9 +2,11 @@ package s3vfs
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
 	pathpkg "path"
@@ -13,6 +15,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"golang.org/x/tools/godoc/vfs"
 
 	"sourcegraph.com/sourcegraph/rwvfs"
 )
@@ -30,6 +34,7 @@ func TestS3VFS(t *testing.T) {
 	}
 	for _, test := range tests {
 		testWrite(t, test.fs, test.path)
+		testOpen(t, test.fs)
 		testStat(t, test.fs, "/qux")
 		testGlob(t, test.fs)
 	}
@@ -82,6 +87,156 @@ func testGlob(t *testing.T, fs rwvfs.FileSystem) {
 	}
 }
 
+type rangeRecordingTransport struct {
+	readRanges []string // HTTP Range header vals
+}
+
+func (t *rangeRecordingTransport) reset() { t.readRanges = nil }
+
+func (t *rangeRecordingTransport) checkOnlyReadRange(start, end int64) error {
+	wantRng := fmt.Sprintf("bytes=%d-%d", start, end)
+
+	var unexpectedRanges []string
+	for _, rng := range t.readRanges {
+		if rng != wantRng {
+			unexpectedRanges = append(unexpectedRanges, rng)
+		}
+	}
+	if len(unexpectedRanges) == 0 {
+		return nil
+	}
+	return fmt.Errorf("read unexpected ranges %v, want only between %d-%d", unexpectedRanges, start, end)
+}
+
+func (t *rangeRecordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.readRanges = append(t.readRanges, req.Header.Get("range"))
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func testOpen(t *testing.T, fs rwvfs.FileSystem) {
+	const path = "testOpen"
+
+	var buf bytes.Buffer
+	for i := uint8(0); i < 255; i++ {
+		for j := uint8(0); j < 255; j++ {
+			buf.Write([]byte{i, j})
+		}
+	}
+	fullData := []byte(base64.StdEncoding.EncodeToString(buf.Bytes()))[10:]
+	fullLen := int64(len(fullData))
+	createFile(t, fs, path, fullData)
+
+	{
+		// Full reads.
+		f, err := fs.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := ioutil.ReadAll(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		if !bytes.Equal(b, fullData) {
+			t.Errorf("full read: got %q, want %q", b, fullData)
+		}
+	}
+
+	{
+		// Partial reads.
+		rrt := &rangeRecordingTransport{}
+		fs.(*S3FS).config.Client = &http.Client{Transport: rrt}
+		fs.(rwvfs.ExplicitFetchOpener).ExplicitFetch(true)
+
+		var f vfs.ReadSeekCloser
+
+		cases := [][2]int64{
+			{0, 0},
+			{0, 1},
+			{0, 2},
+			{1, 1},
+			{0, 3},
+			{1, 3},
+			{2, 3},
+			{0, 2},
+			{0, 3},
+			{3, 4},
+			{0, fullLen / 2},
+			{1, fullLen / 2},
+			{fullLen / 3, fullLen / 2},
+			{0, fullLen - 1},
+			{1, fullLen - 1},
+			{fullLen / 2, fullLen/2 + 1333},
+			{fullLen / 2, fullLen/2 + 1},
+			{fullLen / 2, fullLen/2 + 2},
+			{fullLen / 2, fullLen / 2},
+		}
+		_ = fullLen
+		for _, reuse := range []bool{false, true} {
+			for i, c := range cases {
+				if !reuse || i == 0 {
+					var err error
+					f, err = fs.Open(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				rrt.reset()
+
+				start, end := c[0], c[1]
+				label := fmt.Sprintf("range %d-%d (reuse=%v)", start, end, reuse)
+
+				if err := f.(rwvfs.Fetcher).Fetch(start, end); err != nil {
+					t.Error(err)
+					continue
+				}
+
+				n, err := f.Seek(start, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n != start {
+					t.Errorf("got post-Seek offset %d, want %d", n, start)
+				}
+				b, err := ioutil.ReadAll(io.LimitReader(f, end-start))
+				if err != nil {
+					t.Fatalf("%s: ReadAll: %s", label, err)
+				}
+
+				trunc := func(b []byte) string {
+					if len(b) > 75 {
+						return string(b[:75]) + "..." + string(b[len(b)-5:]) + fmt.Sprintf(" (%d bytes total)", len(b))
+					}
+					return string(b)
+				}
+				if want := fullData[start:end]; !bytes.Equal(b, want) {
+					t.Errorf("%s: full read: got %q, want %q", label, trunc(b), trunc(want))
+					continue
+				}
+
+				if start != end && !reuse {
+					if len(rrt.readRanges) == 0 {
+						t.Errorf("%s: no read ranges, want range %d-%d", label, start, end)
+					}
+					if err := rrt.checkOnlyReadRange(start, end); err != nil {
+						t.Error(err)
+					}
+				}
+
+				if !reuse || i == len(cases)-1 {
+					if err := f.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		}
+	}
+}
+
 func testStat(t *testing.T, fs rwvfs.FileSystem, path string) {
 	label := fmt.Sprintf("Stat %T", fs)
 
@@ -111,19 +266,6 @@ func testStat(t *testing.T, fs rwvfs.FileSystem, path string) {
 		t.Fatalf("%s: Stat(%s): got error %v, want os.IsNotExist-satisfying", label, path+"/z", err)
 	}
 
-	createFile := func(path string) {
-		w, err := fs.Create(path)
-		if err != nil {
-			t.Fatalf("%s: Create(%s): %s", label, path, err)
-		}
-		if _, err := w.Write([]byte("x")); err != nil {
-			t.Fatalf("%s: Write(%s): %s", label, path, err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatalf("%s: w.Close(): %s", label, err)
-		}
-	}
-
 	// Not sure of the best way to treat S3 keys that are
 	// delimiter-prefixes of other keys, since they can either be like
 	// dirs or files. But let's just choose a way and add a test so we
@@ -132,8 +274,8 @@ func testStat(t *testing.T, fs rwvfs.FileSystem, path string) {
 	for _, x := range cases {
 		t.Logf("# parent %q, child %q", x.parent, x.child)
 
-		createFile(x.parent)
-		createFile(x.child)
+		createFile(t, fs, x.parent, []byte("x"))
+		createFile(t, fs, x.child, []byte("x"))
 
 		parentFI, err := fs.Stat(x.parent)
 		if err != nil {
@@ -242,6 +384,19 @@ func testWrite(t *testing.T, fs rwvfs.FileSystem, path string) {
 		t.Errorf("%s: Stat(%q): want os.IsNotExist-satisfying error, got %q", label, path, err)
 	} else if err == nil {
 		t.Errorf("%s: Stat(%q): want file to not exist, got existing file with FileInfo %+v", label, path, fi)
+	}
+}
+
+func createFile(t *testing.T, fs rwvfs.FileSystem, path string, contents []byte) {
+	w, err := fs.Create(path)
+	if err != nil {
+		t.Fatalf("Create(%s): %s", path, err)
+	}
+	if _, err := w.Write(contents); err != nil {
+		t.Fatalf("Write(%s): %s", path, err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("w.Close(): %s", err)
 	}
 }
 
