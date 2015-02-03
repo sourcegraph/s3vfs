@@ -98,7 +98,7 @@ func cloneRequest(r *http.Request) *http.Request {
 	return r2
 }
 
-func (fs *S3FS) open(name string, rangeHeader string) (vfs.ReadSeekCloser, error) {
+func (fs *S3FS) open(name string, rangeHeader string) (f vfs.ReadSeekCloser, err error) {
 	cfg := fs.config
 	if rangeHeader != "" {
 		tmp := *cfg
@@ -119,7 +119,12 @@ func (fs *S3FS) open(name string, rangeHeader string) (vfs.ReadSeekCloser, error
 	if err != nil {
 		return nil, err
 	}
-	defer rdr.Close()
+	defer func() {
+		err2 := rdr.Close()
+		if err == nil {
+			err = err2
+		}
+	}()
 	return nopCloser{bytes.NewReader(b)}, nil
 }
 
