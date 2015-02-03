@@ -78,9 +78,6 @@ func (t rangeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	resp, err := transport.RoundTrip(req)
-	if resp != nil && resp.StatusCode == http.StatusPartialContent {
-		resp.StatusCode = http.StatusOK
-	}
 	return resp, err
 }
 
