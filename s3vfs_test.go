@@ -185,7 +185,9 @@ func testOpen(t *testing.T, fs rwvfs.FileSystem) {
 						}
 					}
 
-					f.(*explicitFetchFile).autofetch = autofetch
+					f.(interface {
+						SetAutofetch(bool)
+					}).SetAutofetch(true)
 
 					rrt.reset()
 
